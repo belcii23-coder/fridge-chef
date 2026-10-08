@@ -192,6 +192,9 @@ export default async function handler(req, res) {
         if (!Array.isArray(parsed.recipes)) throw new Error("Missing recipes array");
       } catch (err) {
         if (gotAnyAnswer || good.length || backup.length) break; // keep what we have
+        console.error("Recipe attempt failed:", attempt, err?.message);
+        // A garbled answer (not an AI outage): just ask again.
+        if (!(err instanceof AiError) && attempt < 2) continue;
         throw err;
       }
       gotAnyAnswer = true;

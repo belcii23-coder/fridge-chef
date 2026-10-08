@@ -7,6 +7,7 @@
 //   3. ANTHROPIC_API_KEY set  -> Claude
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+const GEMINI_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-2.5-flash-lite").split(",").map((m) => m.trim()).filter(Boolean);
 const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
 
 export class AiError extends Error {
@@ -71,7 +72,6 @@ async function callGemini(system, userText, image) {
   if (image) parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
   parts.push({ text: userText });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: system }] },
     contents: [{ role: "user", parts }],
@@ -81,39 +81,51 @@ async function callGemini(system, userText, image) {
       temperature: 0.7
     }
   });
-  const send = () =>
-    fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
-      body,
-      signal: AbortSignal.timeout(22000) // never hang past the function limit
-    });
 
-  let apiRes;
-  try {
-    apiRes = await send();
-    // The free tier is sometimes busy (503) or briefly rate limited (429): try once more.
-    if (apiRes.status === 503 || apiRes.status === 500 || apiRes.status === 429) {
-      await new Promise((r) => setTimeout(r, 1500));
-      apiRes = await send();
+  // If the main model is slow or busy, fall back to a backup model so the user still gets recipes.
+  const models = [GEMINI_MODEL, ...GEMINI_FALLBACKS.filter((m) => m !== GEMINI_MODEL)];
+  let lastErr = null;
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    try {
+      const apiRes = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
+        body,
+        signal: AbortSignal.timeout(i === 0 ? 20000 : 24000)
+      });
+
+      if (!apiRes.ok) {
+        console.error(`Gemini API error (${model}):`, apiRes.status, await apiRes.text());
+        lastErr = new AiError(friendlyFor(apiRes.status, "GEMINI_API_KEY"), apiRes.status === 429 ? 429 : 502);
+        if (apiRes.status === 401 || apiRes.status === 403) throw lastErr; // a bad key won't fix itself
+        continue;
+      }
+
+      const data = await apiRes.json();
+      const text = (data?.candidates?.[0]?.content?.parts || [])
+        .filter((p) => !p.thought)
+        .map((p) => p.text || "")
+        .join("");
+      if (!text) {
+        console.error(`Gemini returned no text (${model}):`, JSON.stringify(data).slice(0, 500));
+        lastErr = new AiError("The AI didn't return anything this time. Please try again.", 502);
+        continue;
+      }
+      return text;
+    } catch (err) {
+      if (err instanceof AiError) {
+        if (err.status === 401 || err.status === 403) throw err;
+        lastErr = err;
+        continue;
+      }
+      console.error(`Gemini request failed (${model}):`, err?.name, err?.message);
+      lastErr = new AiError("The AI is taking too long right now. Please try again in a moment.", 504);
     }
-  } catch (err) {
-    console.error("Gemini request failed:", err?.name, err?.message);
-    throw new AiError("The AI is taking too long right now. Please try again in a moment.", 504);
   }
-
-  if (!apiRes.ok) {
-    console.error("Gemini API error:", apiRes.status, await apiRes.text());
-    throw new AiError(friendlyFor(apiRes.status, "GEMINI_API_KEY"));
-  }
-
-  const data = await apiRes.json();
-  const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-  if (!text) {
-    console.error("Gemini returned no text:", JSON.stringify(data).slice(0, 500));
-    throw new AiError("The AI didn't return anything this time. Please try again.", 502);
-  }
-  return text;
+  throw lastErr || new AiError("The AI is not available right now. Please try again.", 502);
 }
 
 async function callClaude(system, userText, image) {
