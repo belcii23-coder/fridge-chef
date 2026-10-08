@@ -176,7 +176,10 @@ export default async function handler(req, res) {
     let lastNote = "";
     let gotAnyAnswer = false;
 
+    const startedAt = Date.now();
     for (let attempt = 0; attempt < 3 && good.length < count; attempt++) {
+      // Stay safely inside the function time limit: stop retrying if we already have something.
+      if (attempt > 0 && Date.now() - startedAt > 30000 && (good.length || backup.length)) break;
       let parsed;
       try {
         const known = [...exclude, ...good.map((g) => g.name)];

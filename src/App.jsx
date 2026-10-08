@@ -66,13 +66,25 @@ function shrinkImage(file, maxSize = 1024, quality = 0.8) {
 }
 
 async function postJson(path, payload) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch {
+    throw new Error("Couldn't reach the server. Check your internet and try again.");
+  }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  if (!res.ok) {
+    throw new Error(
+      data.error ||
+        (res.status >= 500
+          ? "The AI took too long or is busy. Please tap Find recipes again."
+          : "Something went wrong. Please try again.")
+    );
+  }
   return data;
 }
 

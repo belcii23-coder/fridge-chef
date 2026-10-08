@@ -72,22 +72,35 @@ async function callGemini(system, userText, image) {
   parts.push({ text: userText });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  const apiRes = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-goog-api-key": process.env.GEMINI_API_KEY
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        maxOutputTokens: 8192,
-        temperature: 0.7
-      }
-    })
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      maxOutputTokens: 8192,
+      temperature: 0.7
+    }
   });
+  const send = () =>
+    fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
+      body,
+      signal: AbortSignal.timeout(22000) // never hang past the function limit
+    });
+
+  let apiRes;
+  try {
+    apiRes = await send();
+    // The free tier is sometimes busy (503) or briefly rate limited (429): try once more.
+    if (apiRes.status === 503 || apiRes.status === 500 || apiRes.status === 429) {
+      await new Promise((r) => setTimeout(r, 1500));
+      apiRes = await send();
+    }
+  } catch (err) {
+    console.error("Gemini request failed:", err?.name, err?.message);
+    throw new AiError("The AI is taking too long right now. Please try again in a moment.", 504);
+  }
 
   if (!apiRes.ok) {
     console.error("Gemini API error:", apiRes.status, await apiRes.text());
