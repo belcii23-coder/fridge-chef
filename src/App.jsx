@@ -185,7 +185,7 @@ function AiBadge({ children = "AI" }) {
 
 export default function App() {
   const [tab, setTab] = useState("cook");
-  const [ingredients, setIngredients] = useState(() => load("fc.ingredients", []));
+  const [ingredients, setIngredients] = useState([]); // starts empty every time: last time's ingredients should not mix with a new search
   const [draft, setDraft] = useState("");
   const [budget, setBudget] = useState(() => load("fc.budget", 50));
   const [equipment, setEquipment] = useState(() => load("fc.equipment", EQUIPMENT[0]));
@@ -215,7 +215,13 @@ export default function App() {
   const uploadRef = useRef(null);
   const resultsRef = useRef(null);
 
-  useEffect(() => save("fc.ingredients", ingredients), [ingredients]);
+  useEffect(() => {
+    try {
+      localStorage.removeItem("fc.ingredients"); // older versions saved the list; forget it
+    } catch {
+      /* ignore */
+    }
+  }, []);
   useEffect(() => save("fc.budget", budget), [budget]);
   useEffect(() => save("fc.equipment", equipment), [equipment]);
   useEffect(() => save("fc.servings", servings), [servings]);
