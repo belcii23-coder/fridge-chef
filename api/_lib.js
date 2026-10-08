@@ -6,8 +6,8 @@
 //   2. GEMINI_API_KEY is set  -> Google Gemini (has a free tier)
 //   3. ANTHROPIC_API_KEY set  -> Claude
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-const GEMINI_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-2.5-flash-lite").split(",").map((m) => m.trim()).filter(Boolean);
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+const GEMINI_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-flash-lite-latest,gemini-2.5-flash-lite,gemini-3.5-flash-lite").split(",").map((m) => m.trim()).filter(Boolean);
 const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
 
 export class AiError extends Error {
@@ -85,9 +85,11 @@ async function callGemini(system, userText, image) {
   // If the main model is slow or busy, fall back to a backup model so the user still gets recipes.
   const models = [GEMINI_MODEL, ...GEMINI_FALLBACKS.filter((m) => m !== GEMINI_MODEL)];
   let lastErr = null;
+  const startedAt = Date.now();
 
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
+    if (i > 0 && Date.now() - startedAt > 30000) break; // stay inside the function time limit
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     try {
       const apiRes = await fetch(url, {
@@ -98,8 +100,12 @@ async function callGemini(system, userText, image) {
       });
 
       if (!apiRes.ok) {
-        console.error(`Gemini API error (${model}):`, apiRes.status, await apiRes.text());
-        lastErr = new AiError(friendlyFor(apiRes.status, "GEMINI_API_KEY"), apiRes.status === 429 ? 429 : 502);
+        const errText = await apiRes.text();
+        console.error(`Gemini API error (${model}):`, apiRes.status, errText);
+        let why = "";
+        try { why = JSON.parse(errText)?.error?.message || ""; } catch {}
+        const detail = ` [${model}: ${apiRes.status}${why ? " " + why.slice(0, 120) : ""}]`;
+        lastErr = new AiError(friendlyFor(apiRes.status, "GEMINI_API_KEY") + detail, apiRes.status === 429 ? 429 : 502);
         if (apiRes.status === 401 || apiRes.status === 403) throw lastErr; // a bad key won't fix itself
         continue;
       }
