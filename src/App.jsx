@@ -221,7 +221,15 @@ export default function App() {
   const [swapping, setSwapping] = useState({}); // recipe name -> true while a replacement is loading
   const [swapError, setSwapError] = useState({}); // recipe name -> message
   const [more, setMore] = useState(false);
-  const [cooking, setCooking] = useState(null); // recipe shown in cook mode
+  const [cookList, setCookList] = useState([]); // dishes being cooked right now (you can cook several at once)
+  const [cookMin, setCookMin] = useState(false); // cook mode shrunk to a small bar so you can browse recipes
+
+  // While cook mode is shrunk to its small bar, leave room for it so it never covers buttons.
+  useEffect(() => {
+    const on = cookList.length > 0 && cookMin;
+    document.body.classList.toggle("has-cook-mini", on);
+    return () => document.body.classList.remove("has-cook-mini");
+  }, [cookList.length, cookMin]);
 
   const takeRef = useRef(null);
   const uploadRef = useRef(null);
@@ -784,12 +792,28 @@ export default function App() {
           onToggleItem={(ing) => toggleShopping(open, ing)}
           onAddAll={() => addAllToShopping(open)}
           onCook={() => {
-            setCooking(withStatus(open, pantry));
+            const dish = withStatus(open, pantry);
+            setCookList((list) => (list.some((d) => d.name === dish.name) ? list : [...list, dish]));
+            setCookMin(false);
             setOpen(null);
           }}
         />
       )}
-      {cooking && <CookMode recipe={cooking} onClose={() => setCooking(null)} />}
+      {cookList.length > 0 && (
+        <CookMode
+          dishes={cookList}
+          choices={[...recipes, ...saved].filter((c, i, a) => a.findIndex((x) => x.name === c.name) === i).map((c) => withStatus(c, pantry))}
+          minimized={cookMin}
+          onAddDish={(dish) => setCookList((list) => (list.some((d) => d.name === dish.name) ? list : [...list, dish]))}
+          onRemoveDish={(name) => setCookList((list) => list.filter((d) => d.name !== name))}
+          onMinimize={() => setCookMin(true)}
+          onRestore={() => setCookMin(false)}
+          onClose={() => {
+            setCookList([]);
+            setCookMin(false);
+          }}
+        />
+      )}
     </div>
   );
 }

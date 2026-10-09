@@ -19,7 +19,8 @@ Rules:
 - If "Do not suggest" dishes are given, suggest different dishes.
 
 COMPLETE INGREDIENT LIST (very important):
-- "ingredients" lists EVERYTHING the dish needs, with a realistic amount for the stated servings, for example "2 cloves", "1 tbsp", "1/2 cup", "1 small can".
+- "ingredients" lists EVERYTHING the dish needs, with an EXACT measurement for the stated servings, for example "2 cloves", "1 tbsp", "1/2 cup", "1 small can", "250 g".
+- EVERY ingredient needs an exact measurement that contains a number, especially salt, pepper, sugar, soy sauce, vinegar, fish sauce, cooking oil, water and other condiments. Use level measuring spoons and cups (1/4 tsp, 1/2 tsp, 1 tsp, 1 tbsp, 1/4 cup, 1 cup), grams (g) or millilitres (ml) for meat and vegetables, and counts (pcs, cloves, 1 medium onion). NEVER write "to taste", "a pinch", "a dash", "some", "a little", "as needed" or an empty amount. Scale the amounts to the number of servings, and keep the amount in the ingredient list and the step the same.
 - A Filipino dish is not complete without its pampalasa. Always include the seasonings and condiments the real dish uses, such as salt, pepper, soy sauce (toyo), vinegar (suka), fish sauce (patis), garlic (bawang), onion (sibuyas), tomato (kamatis), ginger (luya), bay leaf (laurel), sugar, calamansi, cooking oil, cooking water or broth. Mark them with "kind": "pampalasa". Main foods (meat, vegetables, eggs, rice, noodles) are "kind": "main".
 - "status" is "have" if the user listed it, "pantry" if it is in their Always-at-home list, otherwise "buy".
 - For every "buy" item give "price_php", a rough price in pesos for just the amount needed (a whole small pack is fine, for example salt or soy sauce sachet around 5 to 10).
@@ -29,7 +30,7 @@ COMPLETE STEPS (very important):
 - 5 to 9 short, beginner-friendly steps in the right cooking order.
 - Every ingredient in the list must appear in a step, and each pampalasa must be added in a step with its amount and when to add it (for example "Add 2 tbsp soy sauce and 1/4 cup vinegar. Do not stir until it boils.").
 - Use the real Filipino technique where it applies: gisa (sauté garlic, onion, tomato in oil), simmering until tender, and so on.
-- The last cooking step must be a taste check ("Tikman: add a pinch of salt, pepper or sugar if needed") before serving.
+- The last cooking step must be a taste check with exact amounts, for example "Tikman: add up to 1/4 tsp more salt or 1/8 tsp more pepper if needed", before serving.
 
 OTHER FIELDS:
 - "substitutions" gives 0 to 2 short tips like "No vinegar? Use calamansi juice."
@@ -63,10 +64,60 @@ If the input is not a list of food ingredients, return {"recipes": [], "note": "
 
 /* ---------- clean up whatever the AI returned ---------- */
 
+/* ---------- exact amounts: fill in anything the AI left vague ---------- */
+
+// Typical amount for ONE serving of common seasonings: [quantity, unit].
+const DEFAULT_AMOUNTS = {
+  salt: [0.25, "tsp"],
+  pepper: [0.125, "tsp"],
+  sugar: [1, "tsp"],
+  "soy sauce": [1.5, "tbsp"],
+  vinegar: [1, "tbsp"],
+  "fish sauce": [1, "tsp"],
+  oil: [1, "tbsp"],
+  garlic: [2, "cloves"],
+  onion: [0.5, "medium"],
+  ginger: [1, "thumb-size piece"],
+  tomato: [1, "medium"],
+  calamansi: [2, "pcs"],
+  "bay leaf": [1, "pc"],
+  water: [1, "cup"]
+};
+
+const hasNumber = (s) => /[0-9½¼¾⅓⅔⅛]/.test(String(s || ""));
+
+function formatQty(n) {
+  const whole = Math.floor(n + 1e-9);
+  const frac = n - whole;
+  const fractions = [[0, ""], [0.125, "1/8"], [0.25, "1/4"], [0.333, "1/3"], [0.5, "1/2"], [0.667, "2/3"], [0.75, "3/4"], [1, ""]];
+  let best = fractions[0];
+  for (const f of fractions) if (Math.abs(f[0] - frac) < Math.abs(best[0] - frac)) best = f;
+  if (best[0] === 1) return String(whole + 1);
+  if (!best[1]) return String(whole || 1);
+  return whole ? `${whole} ${best[1]}` : best[1];
+}
+
+function defaultAmount(name, servings) {
+  const d = DEFAULT_AMOUNTS[canon(name)];
+  if (!d) return "";
+  let [qty, unit] = d;
+  qty *= Math.max(servings, 1);
+  if (unit === "tsp" && qty >= 3) {
+    qty /= 3;
+    unit = "tbsp";
+  }
+  if (unit === "tbsp" && qty >= 8) {
+    qty /= 16;
+    unit = "cup";
+  }
+  if (unit === "cloves" && qty === 1) unit = "clove";
+  return `${formatQty(qty)} ${unit}`;
+}
+
 const text = (v, max) => String(v ?? "").trim().slice(0, max);
 const splitList = (v) => (Array.isArray(v) ? v : String(v || "").split(/[,\n]/)).map((s) => text(s, 60)).filter(Boolean);
 
-function normalizeRecipe(raw, userList, pantry) {
+function normalizeRecipe(raw, userList, pantry, servings = 1) {
   if (!raw || typeof raw !== "object") return null;
   const name = text(raw.name, 80);
   if (!name) return null;
@@ -98,7 +149,10 @@ function normalizeRecipe(raw, userList, pantry) {
     else if (status === "pantry") status = "buy"; // the AI claimed pantry but it isn't in their list
 
     const price = status === "buy" ? Math.max(0, Math.min(Math.round(Number(o.price_php) || 0), 2000)) : 0;
-    ingredients.push({ name: n, amount: text(o.amount, 30), kind, status, price_php: price });
+    // Exact amounts only: if the AI wrote "to taste" or left it empty, use a sensible per-serving amount.
+    let amount = text(o.amount, 30);
+    if (!hasNumber(amount)) amount = defaultAmount(n, servings) || amount;
+    ingredients.push({ name: n, amount, kind, status, price_php: price });
   }
 
   const steps = (Array.isArray(raw.steps) ? raw.steps : []).map((s) => text(s, 400)).filter(Boolean).slice(0, 12);
@@ -205,7 +259,7 @@ export default async function handler(req, res) {
 
       const problems = [];
       for (const raw of parsed.recipes) {
-        const r = normalizeRecipe(raw, userList, pantry);
+        const r = normalizeRecipe(raw, userList, pantry, servings);
         if (!r) continue;
         if (good.some((g) => sameDish(g, r)) || exclude.some((e) => canon(e) === canon(r.name))) continue;
 
