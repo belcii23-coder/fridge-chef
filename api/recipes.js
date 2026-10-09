@@ -9,8 +9,9 @@ function buildSystemPrompt(count) {
 The user tells you what ingredients they have. Suggest simple, realistic dishes they can cook right now.
 
 Rules:
-- Suggest exactly ${count} dish${count === 1 ? "" : "es"}. The "recipes" array must always contain ${count} item${count === 1 ? "" : "s"}. Filipino dishes are the TOP PRIORITY: all ${count === 1 ? "the dish" : "dishes"} should be Filipino (home-style ulam, sabaw, ginisa, prito, nilaga and so on) whenever any Filipino dish can be made from the ingredients. Only suggest a non-Filipino dish if no Filipino dish is realistic, and then say so in the note.
+- Suggest exactly ${count} dish${count === 1 ? "" : "es"}. The "recipes" array must always contain ${count} item${count === 1 ? "" : "s"}. Filipino dishes are the TOP PRIORITY: all ${count === 1 ? "the dish" : "dishes"} should be Filipino (home-style ulam, sabaw, prito, nilaga, adobo, torta, silog, lugaw and so on) whenever any Filipino dish can be made from the ingredients. Only suggest a non-Filipino dish if no Filipino dish is realistic, and then say so in the note.
 - Think of the real, traditional Filipino dishes that these ingredients are known for FIRST, and use their authentic names and methods. Examples: minced pork + misua = "Misua with Bola-bola" (meatballs shaped from the minced pork with egg, onion and a little flour or breadcrumbs, simmered in broth with the misua added last); ground pork + eggs = "Giniling" or "Tortang Giniling"; sardines = "Ginisang Sardinas"; eggplant + egg = "Tortang Talong"; corned beef + potato = "Ginisang Corned Beef"; pork or chicken + soy sauce + vinegar = "Adobo". Always use the Filipino dish name, not an English description (write "Misua with Bola-bola", never "Misua Soup with Pork Balls"; "Tortang Talong", never "Eggplant Omelette"). Only fall back to a generic "soup" or "stir fry" when no classic dish fits.
+- VARIETY: the dishes must be different kinds of dishes (for example one sabaw or soup, one torta or prito, one adobo or stew, one silog or rice meal, one noodle dish). At most ONE dish may be a "Ginisang ..." (sautéed) dish, and only when it is truly the classic dish for those ingredients. Never put "Ginisang" in front of a dish just because it is sautéed first, and do not start every suggestion the same way.
 - Rank by how few extra ingredients are needed. The best dish uses only what the user already has.
 - Respect the budget (in Philippine pesos) for any extra ingredients the user would need to buy. If no budget is given, keep extras minimal.
 - Respect the equipment limit. If they only have a rice cooker or one pot, do not require an oven or multiple pans.
@@ -33,6 +34,7 @@ COMPLETE STEPS (very important):
 - The last cooking step must be a taste check with exact amounts, for example "Tikman: add up to 1/4 tsp more salt or 1/8 tsp more pepper if needed", before serving.
 
 OTHER FIELDS:
+- "step_minutes" is a list with exactly one number per step: the realistic number of minutes the cook should set a timer for in that step (simmering, boiling, frying, steaming, baking, marinating, resting), or 0 when the step needs no timer. If a step names a time, use that time. Example: [0, 2, 15, 0].
 - "substitutions" gives 0 to 2 short tips like "No vinegar? Use calamansi juice."
 - "photo_query" is the core dish only, as it would appear in a photo file name, 1 to 3 words, lowercase, with no side dishes or extras. Use the real Filipino or common name, for example "pork adobo", "tortang talong", "sinangag" (not "sinangag at hotdog"), "lechon kawali", "sinigang na baboy", "tapsilog".
 - "photo_english" is another well-known name of the SAME dish (an English name or a popular nickname), 1 to 3 words, lowercase, used to find a photo, for example "garlic fried rice" for sinangag, "eggplant omelette" for tortang talong, "pork stew" for humba, "hotsilog" for sinangag with hotdog and egg. It must be a prepared dish, never a raw ingredient. Use an empty string if there is none.
@@ -54,6 +56,7 @@ Respond with ONLY valid JSON, no markdown, no commentary, in exactly this shape:
         { "name": "bay leaf", "amount": "2 pcs", "kind": "pampalasa", "status": "buy", "price_php": 5 }
       ],
       "steps": ["step 1", "step 2"],
+      "step_minutes": [0, 10],
       "substitutions": ["optional tips"]
     }
   ],
@@ -114,6 +117,7 @@ function defaultAmount(name, servings) {
   return `${formatQty(qty)} ${unit}`;
 }
 
+const isGinisang = (name) => /^(ginisang|gisadong|gisado|ginisa)\b/i.test(String(name || "").trim());
 const text = (v, max) => String(v ?? "").trim().slice(0, max);
 const splitList = (v) => (Array.isArray(v) ? v : String(v || "").split(/[,\n]/)).map((s) => text(s, 60)).filter(Boolean);
 
@@ -155,7 +159,14 @@ function normalizeRecipe(raw, userList, pantry, servings = 1) {
     ingredients.push({ name: n, amount, kind, status, price_php: price });
   }
 
-  const steps = (Array.isArray(raw.steps) ? raw.steps : []).map((s) => text(s, 400)).filter(Boolean).slice(0, 12);
+  const rawMinutes = Array.isArray(raw.step_minutes) ? raw.step_minutes : [];
+  const pairs = (Array.isArray(raw.steps) ? raw.steps : [])
+    .map((s, i) => [text(s, 400), Math.round(Number(rawMinutes[i]) || 0)])
+    .filter(([s]) => s)
+    .slice(0, 12);
+  const steps = pairs.map(([s]) => s);
+  // AI-suggested timer for each step (0 = no timer needed). The cook can follow it or change it.
+  const step_minutes = pairs.map(([, m]) => (m > 0 ? Math.min(m, 180) : 0));
 
   const buy = ingredients.filter((i) => i.status === "buy");
   return {
@@ -167,6 +178,7 @@ function normalizeRecipe(raw, userList, pantry, servings = 1) {
     difficulty: raw.difficulty === "Medium" ? "Medium" : "Easy",
     ingredients,
     steps,
+    step_minutes,
     substitutions: splitList(raw.substitutions).slice(0, 2),
     // kept for older screens and for the shopping list
     uses: ingredients.filter((i) => i.status !== "buy").map((i) => i.name),
@@ -224,6 +236,7 @@ export default async function handler(req, res) {
 
   try {
     const good = [];
+    const spare = []; // extra "Ginisang ..." dishes, only used if nothing else is available
     const backup = []; // dishes that pass the diet check but are missing steps or seasonings
     let feedback = "";
     let blocked = 0; // dishes thrown away for breaking a diet rule
@@ -270,6 +283,12 @@ export default async function handler(req, res) {
           continue;
         }
         if (isComplete(r)) {
+          // Keep the suggestions varied: only one "Ginisang ..." dish per set.
+          if (isGinisang(r.name) && good.some((g) => isGinisang(g.name))) {
+            if (!spare.some((x) => sameDish(x, r))) spare.push(r);
+            problems.push(`"${r.name}" is another "Ginisang" dish. Give a different kind of dish (sabaw, torta, prito, adobo, silog, noodles)`);
+            continue;
+          }
           if (good.length < count) good.push(r);
         } else if (!backup.some((b) => sameDish(b, r))) {
           backup.push(r);
@@ -278,6 +297,8 @@ export default async function handler(req, res) {
       }
       feedback = problems.length ? `\nFix these problems from your last answer: ${problems.join("; ")}.` : "";
     }
+
+    while (good.length < count && spare.length) good.push(spare.shift());
 
     // Top up with incomplete-but-safe dishes only if we found nothing complete.
     const recipes = good.length ? good : backup.slice(0, count);

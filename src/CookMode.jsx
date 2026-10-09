@@ -356,7 +356,12 @@ export default function CookMode({ dishes, choices = [], minimized, onAddDish, o
   const addable = choices.filter((c) => !dishes.some((d) => d.name === c.name));
 
   const timerKey = keyOf(r.name, idx);
-  const planned = plan[timerKey] ?? found[0]?.seconds;
+  // The recipe's own time (written in the step) comes first, then the AI's suggested minutes for this step.
+  const aiMinutes = Number(r.step_minutes?.[stepNo]) || 0;
+  const aiSeconds = aiMinutes > 0 ? clampSeconds(aiMinutes * 60) : 0;
+  const suggested = found[0]?.seconds || aiSeconds || 0;
+  const suggestedLabel = found[0] ? found[0].label : aiSeconds ? `${aiMinutes} min` : "";
+  const planned = plan[timerKey] ?? (suggested || undefined);
   const t = timers[timerKey];
 
   return (
@@ -511,6 +516,16 @@ export default function CookMode({ dishes, choices = [], minimized, onAddDish, o
                 </div>
               ) : planned ? (
                 <div className="timer-plan">
+                  <div className="timer-suggest">
+                    {suggested ? (
+                      <>
+                        <strong>Suggested time: {suggestedLabel}</strong>
+                        <span> · optional. Use it, change it, or skip it.</span>
+                      </>
+                    ) : (
+                      <strong>Your own timer · optional</strong>
+                    )}
+                  </div>
                   {found.length > 1 && (
                     <div className="timer-choices" aria-label="Times found in this step">
                       {found.map((f) => (
@@ -527,8 +542,14 @@ export default function CookMode({ dishes, choices = [], minimized, onAddDish, o
                   </div>
                   <button className="timer-start" onClick={() => startTimer(timerKey, planned)}>
                     ⏱ Start {mmss(planned)} timer
-                    {found[0] && planned !== found[0].seconds ? <small>(recipe says {found[0].label})</small> : found[0] ? <small>({found[0].label})</small> : null}
+                    {suggested && planned !== suggested ? <small>(suggested {suggestedLabel})</small> : suggested ? <small>(suggested)</small> : null}
                   </button>
+                  <div className="timer-plan-links">
+                    {suggested > 0 && planned !== suggested && (
+                      <button className="timer-link" onClick={() => setPlan((p) => ({ ...p, [timerKey]: suggested }))}>Use suggested time</button>
+                    )}
+                    <button className="timer-link" onClick={() => setPlan((p) => ({ ...p, [timerKey]: 0 }))}>No timer for this step</button>
+                  </div>
                 </div>
               ) : (
                 <button className="timer-add" onClick={() => setPlan((p) => ({ ...p, [timerKey]: 300 }))}>⏱ Set a timer for this step</button>

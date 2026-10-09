@@ -552,3 +552,9 @@ button.ing-buy-on { background: #8a5a00; color: #fff; border-color: #8a5a00; }
 /* leave room for the small cook-mode bar so it never covers page buttons */
 .has-cook-mini .app { padding-bottom: 96px; }
 .has-cook-mini .overlay { padding-bottom: 84px; }
+
+/* optional timer suggestion */
+.timer-suggest { font-size: 1rem; color: var(--ink); }
+.timer-suggest span { color: var(--muted); font-weight: 600; }
+.timer-plan-links { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+.timer-link { min-height: 44px; padding: 0 6px; border: 0; background: none; color: var(--orange-dark); font-weight: 800; text-decoration: underline; font-size: .95rem; }
