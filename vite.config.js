@@ -2,37 +2,36 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-// During `npm run dev`, serve everything in /api locally so you don't need any extra tools.
-// In production (Vercel), the files in /api are deployed as serverless functions instead.
 function localApi(env) {
+  function mount(server, routePath, modulePath) {
+    server.middlewares.use(routePath, async (req, res) => {
+      Object.assign(process.env, env);
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      req.body = Buffer.concat(chunks).toString() || "{}";
+      res.status = (code) => {
+        res.statusCode = code;
+        return res;
+      };
+      res.json = (obj) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(obj));
+      };
+      try {
+        const mod = await server.ssrLoadModule(modulePath);
+        await mod.default(req, res);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Local API crashed. Check the terminal." });
+      }
+    });
+  }
+
   return {
     name: "local-api",
     configureServer(server) {
-      server.middlewares.use("/api", async (req, res, next) => {
-        // req.url is "/recipes" or "/ingredients" here (the /api part is already removed)
-        const name = (req.url || "").split("?")[0].replace(/^\/+/, "");
-        if (!/^[a-z][a-z-]*$/i.test(name)) return next();
-
-        Object.assign(process.env, env);
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        req.body = Buffer.concat(chunks).toString() || "{}";
-        res.status = (code) => {
-          res.statusCode = code;
-          return res;
-        };
-        res.json = (obj) => {
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify(obj));
-        };
-        try {
-          const mod = await server.ssrLoadModule(`/api/${name}.js`);
-          await mod.default(req, res);
-        } catch (err) {
-          console.error(err);
-          res.status(500).json({ error: "Local API crashed. Check the terminal." });
-        }
-      });
+      mount(server, "/api/recipes", "/api/recipes.js");
+      mount(server, "/api/scan", "/api/scan.js");
     }
   };
 }
@@ -62,8 +61,18 @@ export default defineConfig(({ mode }) => {
           ]
         },
         workbox: {
-          // Never serve the app shell for API calls; recipes need a live connection.
-          navigateFallbackDenylist: [/^\/api\//]
+          navigateFallbackDenylist: [/^\/api\//],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/upload\.wikimedia\.org\/.*/i,
+              handler: "CacheFirst",
+              options: {
+                cacheName: "dish-photos",
+                expiration: { maxEntries: 60, maxAgeSeconds: 60 * 60 * 24 * 30 },
+                cacheableResponse: { statuses: [0, 200] }
+              }
+            }
+          ]
         }
       })
     ]
