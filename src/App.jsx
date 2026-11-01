@@ -1,8 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { getDishPhoto, hideDishPhoto, removeMyPhoto, setMyPhoto } from "./dishPhoto.js";
-import { DIET_OPTIONS, PANTRY_SUGGEST, canon, peso, withStatus } from "./food.js";
-import CookMode from "./CookMode.jsx";
-import Shopping from "./Shopping.jsx";
 
 const QUICK_ADD = [
   "Egg", "Rice", "Onion", "Garlic", "Sardines", "Corned beef", "Hotdog",
@@ -24,8 +20,6 @@ const EQUIPMENT = [
   "Microwave only"
 ];
 
-const PROVIDER_NAMES = { gemini: "Google Gemini", claude: "Claude" };
-
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -38,218 +32,257 @@ function load(key, fallback) {
 function save(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* storage can be blocked; the app still works without it */
-  }
+  } catch {}
 }
 
-// Shrinks a photo in the browser before upload so it is fast and small.
-function shrinkImage(file, maxSize = 1024, quality = 0.8) {
+function parseStepSeconds(text) {
+  const match = /(\d+)(?:\s*(?:-|to)\s*(\d+))?\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b/i.exec(text || "");
+  if (!match) return null;
+  const a = parseInt(match[1], 10);
+  const b = match[2] ? parseInt(match[2], 10) : null;
+  const value = b != null ? Math.max(a, b) : a;
+  const unit = match[3].toLowerCase();
+  if (unit.startsWith("h")) return value * 3600;
+  if (unit.startsWith("m")) return value * 60;
+  return value;
+}
+
+function formatClock(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function unlockAlarmAudio(ctxRef) {
+  try {
+    if (!ctxRef.current) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      ctxRef.current = new Ctx();
+    }
+    if (ctxRef.current.state === "suspended") ctxRef.current.resume().catch(() => {});
+  } catch {}
+}
+
+function playAlarmBeeps(ctxRef) {
+  const ctx = ctxRef.current;
+  if (!ctx) return;
+  try {
+    const now = ctx.currentTime;
+    const beepCount = 6;
+    for (let i = 0; i < beepCount; i++) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.value = 880;
+      const start = now + i * 0.45;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.6, start + 0.02);
+      gain.gain.setValueAtTime(0.6, start + 0.26);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.28);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.3);
+    }
+  } catch {}
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300, 150, 300]);
+}
+
+function resizeImageFile(file, maxDim = 1024, quality = 0.75) {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL("image/jpeg", quality));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read that photo."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Couldn't read that photo."));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("That file doesn't look like a photo. Try a JPG or PNG."));
-    };
-    img.src = url;
+    reader.readAsDataURL(file);
   });
 }
 
-async function postJson(path, payload) {
-  let res;
+const svgProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" };
+const IconCamera = () => (
+  <svg width="15" height="15" {...svgProps}><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>
+);
+const IconImage = () => (
+  <svg width="15" height="15" {...svgProps}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="2" /><path d="M21 16l-5-5-8 9" /></svg>
+);
+const IconRefresh = () => (
+  <svg width="16" height="16" {...svgProps} strokeWidth="2.2"><path d="M20 11a8 8 0 0 0-14-4L4 9" /><path d="M4 4v5h5" /><path d="M4 13a8 8 0 0 0 14 4l2-2" /><path d="M20 20v-5h-5" /></svg>
+);
+const IconPlate = () => (
+  <svg width="34" height="34" {...svgProps} strokeWidth="1.6"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4.5" /></svg>
+);
+const IconPan = () => (
+  <svg width="26" height="26" {...svgProps} stroke="#fff"><path d="M6 13a6 6 0 0 1 12 0v1H6z" /><path d="M5 17h14" /><path d="M12 7V5" /></svg>
+);
+
+const imgCache = new Map();
+const STOPWORDS = new Set(["with", "and", "the", "style", "simple", "easy", "quick", "for", "your", "from"]);
+
+function dishWords(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\(.*?\)/g, " ")
+    .replace(/[^a-zñ\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !STOPWORDS.has(w));
+}
+
+async function fetchDishImage(name) {
+  if (imgCache.has(name)) return imgCache.get(name);
+  const url =
+    "https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrlimit=5&prop=pageimages&piprop=thumbnail&pithumbsize=640&format=json&origin=*&gsrsearch=" +
+    encodeURIComponent(name);
   try {
-    res = await fetch(path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload)
+    const res = await fetch(url);
+    const data = await res.json();
+    const pages = Object.values(data?.query?.pages || {}).sort((a, b) => a.index - b.index);
+    const wanted = dishWords(name);
+    const need = Math.max(1, Math.ceil(wanted.length / 2));
+    const hit = pages.find((pg) => {
+      if (!pg.thumbnail?.source) return false;
+      const titleWords = new Set(dishWords(pg.title));
+      return wanted.filter((w) => titleWords.has(w)).length >= need;
     });
+    const value = hit ? { src: hit.thumbnail.source, title: hit.title } : null;
+    imgCache.set(name, value);
+    return value;
   } catch {
-    throw new Error("Couldn't reach the server. Check your internet and try again.");
+    return null;
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(
-      data.error ||
-        (res.status >= 500
-          ? "The AI took too long or is busy. Please tap Find recipes again."
-          : "Something went wrong. Please try again.")
-    );
-  }
-  return data;
 }
 
-// Loads a reference photo for a recipe (null = none found, undefined = still loading)
-function useDishPhoto(recipe) {
-  const [photo, setPhoto] = useState(undefined);
-  const [tick, setTick] = useState(0);
+function DishPhoto({ name, photo, onPhoto, onRemove }) {
+  const inputRef = useRef(null);
+  const [wiki, setWiki] = useState(() => (imgCache.has(name) ? imgCache.get(name) : undefined));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
   useEffect(() => {
-    const again = () => setTick((t) => t + 1);
-    window.addEventListener("fc-photo-hidden", again);
-    return () => window.removeEventListener("fc-photo-hidden", again);
-  }, []);
-  useEffect(() => {
-    let stale = false; // ignore the answer if this card changed or went away meanwhile
-    setPhoto(undefined);
-    getDishPhoto(recipe)
-      .then((p) => !stale && setPhoto(p))
-      .catch(() => !stale && setPhoto(null));
+    if (photo) return;
+    let off = false;
+    fetchDishImage(name).then((v) => {
+      if (!off) setWiki(v);
+    });
     return () => {
-      stale = true;
+      off = true;
     };
-  }, [recipe.name, recipe.photo_query, tick]);
-  return photo;
-}
+  }, [name, photo]);
 
-function DishPhoto({ recipe, className = "" }) {
-  const photo = useDishPhoto(recipe);
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [photo?.url]);
-
-  if (photo === undefined) return <div className={`dish-photo dish-loading ${className}`} aria-hidden="true" />;
-  if (!photo || broken) {
-    return (
-      <label className={`dish-photo dish-fallback ${className}`} title="Add your own photo of this dish">
-        <span aria-hidden="true">🍲</span>
-        <small>📷 Add photo</small>
-        <input
-          type="file"
-          accept="image/*"
-          hidden
-          aria-label={`Add your own photo of ${recipe.name}`}
-          onClick={(e) => e.stopPropagation()}
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            e.target.value = "";
-            if (!file) return;
-            try {
-              setMyPhoto(recipe, await shrinkImage(file, 720, 0.75));
-            } catch {
-              /* a bad file just does nothing */
-            }
-          }}
-        />
-      </label>
-    );
-  }
-  return (
-    <div className={`dish-photo ${className}`}>
-      <img src={photo.url} alt={`Photo: ${photo.title} (similar to ${recipe.name})`} loading="lazy" onError={() => setBroken(true)} />
-    </div>
-  );
-}
-
-function PhotoCredit({ recipe }) {
-  const photo = useDishPhoto(recipe);
-  const fileRef = useRef(null);
-  const [msg, setMsg] = useState("");
-
-  async function onFile(e) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
+  async function pick(file) {
     if (!file) return;
+    setBusy(true);
+    setErr("");
     try {
-      const url = await shrinkImage(file, 720, 0.75);
-      setMsg(setMyPhoto(recipe, url) ? "" : "Couldn't save the photo (device storage is full).");
-    } catch (err) {
-      setMsg(err.message || "Couldn't read that photo.");
+      onPhoto(await resizeImageFile(file, 800, 0.72));
+    } catch (e) {
+      setErr(e.message || "Couldn't read that photo.");
+    } finally {
+      setBusy(false);
     }
   }
 
-  const addBtn = (label) => (
-    <button className="link" onClick={() => fileRef.current?.click()}>{label}</button>
-  );
+  const src = photo || wiki?.src;
 
   return (
-    <div className="photo-credit">
-      <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFile} data-testid="my-photo-input" />
-      {photo?.mine ? (
-        <p>
-          This is your own photo. {addBtn("Replace it")} · <button className="link" onClick={() => removeMyPhoto(recipe)}>Remove</button>
-        </p>
-      ) : photo ? (
-        <p>
-          Photo: <a href={photo.page} target="_blank" rel="noopener noreferrer">{photo.title}</a>
-          {photo.author ? ` by ${photo.author}` : ""}
-          {photo.license ? `, ${photo.license}` : ""}, via Wikimedia Commons. It may not match your dish exactly.{" "}
-          <button className="link" onClick={() => hideDishPhoto(recipe)}>Wrong photo? Hide it</button> · {addBtn("📷 Add my photo")}
-        </p>
-      ) : photo === null ? (
-        <p>No matching photo found. {addBtn("📷 Add my own photo")}</p>
-      ) : null}
-      {msg && <p role="alert">{msg}</p>}
+    <div className="dish-photo">
+      {src ? (
+        <img
+          src={src}
+          alt={photo ? `Your photo of ${name}` : name}
+          loading="lazy"
+          onError={() => {
+            if (!photo) setWiki(null);
+          }}
+        />
+      ) : (
+        <div className={`dish-photo-ph ${wiki === undefined ? "dish-photo-loading" : ""}`}>
+          <span className="dish-photo-emoji"><IconPlate /></span>
+          {wiki === null && <span className="dish-photo-hint">No photo found online. Add a photo of your dish.</span>}
+        </div>
+      )}
+      {photo && <span className="photo-credit">Your photo</span>}
+      {!photo && wiki?.src && <span className="photo-credit">Photo: Wikipedia · {wiki.title}</span>}
+      <div className="photo-actions">
+        <button type="button" className="photo-btn" disabled={busy} onClick={() => inputRef.current?.click()}>
+          {busy ? "Saving…" : photo ? "Change photo" : "Add your photo"}
+        </button>
+        {photo && (
+          <button type="button" className="photo-btn" onClick={onRemove}>
+            Remove
+          </button>
+        )}
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          pick(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
+      {err && <div className="photo-err">{err}</div>}
     </div>
   );
-}
-
-function AiBadge({ children = "AI" }) {
-  return <span className="ai-badge">✨ {children}</span>;
 }
 
 export default function App() {
   const [tab, setTab] = useState("cook");
-  const [ingredients, setIngredients] = useState([]); // starts empty every time: last time's ingredients should not mix with a new search
+  const [ingredients, setIngredients] = useState(() => load("fc.ingredients", []));
   const [draft, setDraft] = useState("");
   const [budget, setBudget] = useState(() => load("fc.budget", 50));
   const [equipment, setEquipment] = useState(() => load("fc.equipment", EQUIPMENT[0]));
   const [servings, setServings] = useState(() => load("fc.servings", 1));
-  const [showOptions, setShowOptions] = useState(false);
   const [recipes, setRecipes] = useState([]);
   const [note, setNote] = useState("");
-  const [provider, setProvider] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(() => load("fc.saved", []));
   const [online, setOnline] = useState(navigator.onLine);
-  const [open, setOpen] = useState(null); // recipe shown in the pop-up
-  const [scan, setScan] = useState({ state: "idle", preview: "", message: "" });
-  const [pantry, setPantry] = useState(() => load("fc.pantry", []));
-  const [diet, setDiet] = useState(() => load("fc.diet", []));
-  const [disliked, setDisliked] = useState(() => load("fc.disliked", []));
-  const [shopping, setShopping] = useState(() => load("fc.shopping", []));
-  const [pantryDraft, setPantryDraft] = useState("");
-  const [showPantry, setShowPantry] = useState(false);
-  const [swapping, setSwapping] = useState({}); // recipe name -> true while a replacement is loading
-  const [swapError, setSwapError] = useState({}); // recipe name -> message
-  const [more, setMore] = useState(false);
-  const [cookList, setCookList] = useState([]); // dishes being cooked right now (you can cook several at once)
-  const [cookMin, setCookMin] = useState(false); // cook mode shrunk to a small bar so you can browse recipes
+  const [quickAddUsage, setQuickAddUsage] = useState(() => load("fc.quickAddUsage", {}));
+  const [photos, setPhotos] = useState(() => load("fc.photos", {}));
+  const [photoWarn, setPhotoWarn] = useState("");
+  const [lastQuery, setLastQuery] = useState(null);
+  const [seenNames, setSeenNames] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
+  const [cookSessions, setCookSessions] = useState([]);
+  const [activeCookId, setActiveCookId] = useState(null);
+  const cameraInputRef = useRef(null);
+  const galleryInputRef = useRef(null);
+  const cookAudioCtxRef = useRef(null);
 
-  // While cook mode is shrunk to its small bar, leave room for it so it never covers buttons.
-  useEffect(() => {
-    const on = cookList.length > 0 && cookMin;
-    document.body.classList.toggle("has-cook-mini", on);
-    return () => document.body.classList.remove("has-cook-mini");
-  }, [cookList.length, cookMin]);
-
-  const takeRef = useRef(null);
-  const uploadRef = useRef(null);
-  const resultsRef = useRef(null);
-
-  useEffect(() => {
-    try {
-      localStorage.removeItem("fc.ingredients"); // older versions saved the list; forget it
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  useEffect(() => save("fc.ingredients", ingredients), [ingredients]);
   useEffect(() => save("fc.budget", budget), [budget]);
   useEffect(() => save("fc.equipment", equipment), [equipment]);
   useEffect(() => save("fc.servings", servings), [servings]);
   useEffect(() => save("fc.saved", saved), [saved]);
-  useEffect(() => save("fc.pantry", pantry), [pantry]);
-  useEffect(() => save("fc.diet", diet), [diet]);
-  useEffect(() => save("fc.disliked", disliked), [disliked]);
-  useEffect(() => save("fc.shopping", shopping), [shopping]);
+  useEffect(() => save("fc.quickAddUsage", quickAddUsage), [quickAddUsage]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("fc.photos", JSON.stringify(photos));
+      setPhotoWarn("");
+    } catch {
+      setPhotoWarn("Your phone's storage for this app is full, so your dish photos may not be kept. Remove a few photos.");
+    }
+  }, [photos]);
 
   useEffect(() => {
     const on = () => setOnline(true);
@@ -262,24 +295,109 @@ export default function App() {
     };
   }, []);
 
-  function addIngredients(list) {
-    const items = list.map((s) => s.trim()).filter(Boolean);
+  useEffect(() => {
+    const anyRunning = cookSessions.some((s) => s.running && s.secondsLeft > 0);
+    if (!anyRunning) return;
+    const t = setTimeout(() => {
+      setCookSessions((prev) =>
+        prev.map((s) => (s.running && s.secondsLeft > 0 ? { ...s, secondsLeft: s.secondsLeft - 1 } : s))
+      );
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [cookSessions]);
+
+  useEffect(() => {
+    const justDone = cookSessions.filter((s) => s.running && s.secondsLeft === 0);
+    if (!justDone.length) return;
+    setCookSessions((prev) => prev.map((s) => (s.running && s.secondsLeft === 0 ? { ...s, running: false } : s)));
+    playAlarmBeeps(cookAudioCtxRef);
+  }, [cookSessions]);
+
+  function updateSession(id, patch) {
+    setCookSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, ...(typeof patch === "function" ? patch(s) : patch) } : s))
+    );
+  }
+
+  function startCooking(recipe) {
+    const id = recipe.name;
+    setCookSessions((prev) => {
+      if (prev.some((s) => s.id === id)) return prev;
+      return [...prev, { id, recipe, stepIndex: 0, gathered: [], secondsLeft: parseStepSeconds((recipe.steps || [])[0]), running: false }];
+    });
+    setActiveCookId(id);
+  }
+
+  function openCooking(id) {
+    setActiveCookId((cur) => (cur === id ? null : id));
+  }
+
+  function endCooking(id) {
+    setCookSessions((prev) => prev.filter((s) => s.id !== id));
+    setActiveCookId((cur) => (cur === id ? null : cur));
+  }
+
+  function confirmCookStep(id) {
+    const session = cookSessions.find((s) => s.id === id);
+    if (!session) return;
+    const steps = session.recipe.steps || [];
+    if (session.stepIndex < steps.length - 1) {
+      const nextIndex = session.stepIndex + 1;
+      updateSession(id, { stepIndex: nextIndex, secondsLeft: parseStepSeconds(steps[nextIndex]), running: false });
+    } else {
+      endCooking(id);
+    }
+  }
+
+  function prevCookStep(id) {
+    const session = cookSessions.find((s) => s.id === id);
+    if (!session || session.stepIndex === 0) return;
+    const steps = session.recipe.steps || [];
+    const prevIndex = session.stepIndex - 1;
+    updateSession(id, { stepIndex: prevIndex, secondsLeft: parseStepSeconds(steps[prevIndex]), running: false });
+  }
+
+  function toggleCookGathered(id, name) {
+    updateSession(id, (s) => ({
+      gathered: s.gathered.includes(name) ? s.gathered.filter((g) => g !== name) : [...s.gathered, name]
+    }));
+  }
+
+  function adjustCookTimer(id, delta) {
+    updateSession(id, (s) => ({ secondsLeft: Math.max(0, (s.secondsLeft ?? 0) + delta) }));
+  }
+
+  function resetCookTimer(id) {
+    const session = cookSessions.find((s) => s.id === id);
+    if (!session) return;
+    updateSession(id, { secondsLeft: parseStepSeconds(session.recipe.steps?.[session.stepIndex]), running: false });
+  }
+
+  function setCookRunning(id, running) {
+    if (running) unlockAlarmAudio(cookAudioCtxRef);
+    updateSession(id, { running });
+  }
+
+  function bumpUsage(name) {
+    const key = name.toLowerCase();
+    setQuickAddUsage((prev) => ({
+      ...prev,
+      [key]: { name: prev[key]?.name || name, count: (prev[key]?.count || 0) + 1 }
+    }));
+  }
+
+  function addIngredient(raw) {
+    const items = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (!items.length) return;
     setIngredients((prev) => {
       const lower = new Set(prev.map((p) => p.toLowerCase()));
-      const fresh = [];
-      for (const i of items) {
-        if (!lower.has(i.toLowerCase())) {
-          lower.add(i.toLowerCase());
-          fresh.push(i);
-        }
-      }
+      const fresh = items.filter((i) => !lower.has(i.toLowerCase()));
       return [...prev, ...fresh];
     });
-  }
-
-  function addFromDraft() {
-    addIngredients(draft.split(","));
+    items.forEach(bumpUsage);
     setDraft("");
   }
 
@@ -290,684 +408,567 @@ export default function App() {
   function toggleQuick(name) {
     const exists = ingredients.some((i) => i.toLowerCase() === name.toLowerCase());
     if (exists) setIngredients((prev) => prev.filter((i) => i.toLowerCase() !== name.toLowerCase()));
-    else addIngredients([name]);
+    else addIngredient(name);
   }
 
-  const MAX_SCAN_PHOTOS = 5;
-
-  async function onPhotoChosen(e) {
-    const picked = Array.from(e.target.files || []);
-    e.target.value = ""; // lets the same photos be picked again later
-    if (!picked.length) return;
-
-    const files = picked.slice(0, MAX_SCAN_PHOTOS);
-    const skipped = picked.length - files.length;
-    setError("");
-
-    const found = [];
-    let failed = 0;
-    let lastError = "";
-    let lastPreview = "";
-    let lastNote = "";
-    for (let i = 0; i < files.length; i++) {
-      const label = files.length > 1 ? `AI is looking at photo ${i + 1} of ${files.length}…` : "AI is looking at your photo…";
-      setScan({ state: "working", preview: lastPreview || URL.createObjectURL(files[i]), message: label });
-      try {
-        const image = await shrinkImage(files[i]);
-        lastPreview = image;
-        const data = await postJson("/api/ingredients", { image });
-        if (data.ingredients?.length) {
-          addIngredients(data.ingredients);
-          found.push(...data.ingredients);
-        } else if (data.note) {
-          lastNote = data.note;
-        }
-      } catch (err) {
-        failed++;
-        lastError = err.message || "Couldn't read that photo.";
+  async function handlePhotos(fileList) {
+    const files = Array.from(fileList || []).slice(0, 4);
+    if (!files.length) return;
+    setScanning(true);
+    setScanError("");
+    try {
+      const images = await Promise.all(files.map((f) => resizeImageFile(f)));
+      const res = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ images })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Couldn't scan the photo.");
+      const found = data.ingredients || [];
+      if (!found.length) {
+        setScanError("Didn't spot any ingredients. Try a clearer or closer photo.");
+      } else {
+        setIngredients((prev) => {
+          const lower = new Set(prev.map((p) => p.toLowerCase()));
+          const fresh = found.filter((i) => !lower.has(i.toLowerCase()));
+          return [...prev, ...fresh];
+        });
+        found.forEach(bumpUsage);
       }
-    }
-
-    if (failed === files.length) {
-      setScan({ state: "idle", preview: "", message: "" });
-      setError(!navigator.onLine ? "You're offline. Reconnect to scan a photo." : lastError);
-      return;
-    }
-
-    const unique = new Set(found.map((f) => f.toLowerCase())).size;
-    const extra = [
-      failed ? `${failed} photo${failed > 1 ? "s" : ""} couldn't be read.` : "",
-      skipped ? `Only the first ${MAX_SCAN_PHOTOS} photos were scanned.` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-
-    if (unique) {
-      setScan({
-        state: "done",
-        preview: lastPreview,
-        message: `AI spotted ${unique} item${unique === 1 ? "" : "s"} in ${files.length - failed} photo${files.length - failed === 1 ? "" : "s"} and added ${unique === 1 ? "it" : "them"} to your list. Remove anything that's wrong. ${extra}`.trim()
-      });
-    } else {
-      setScan({
-        state: "empty",
-        preview: lastPreview,
-        message: `${lastNote || "AI couldn't spot any food in that photo. Try a clearer, closer shot."} ${extra}`.trim()
-      });
+    } catch (e) {
+      setScanError(
+        !navigator.onLine ? "You're offline. Reconnect to scan photos." : e.message || "Couldn't scan the photo."
+      );
+    } finally {
+      setScanning(false);
     }
   }
 
-  async function findRecipes() {
-    // Include whatever is still typed in the box so nothing gets lost.
-    const typed = draft.split(",").map((s) => s.trim()).filter(Boolean);
-    const all = [...ingredients, ...typed.filter((t) => !ingredients.some((i) => i.toLowerCase() === t.toLowerCase()))];
-    if (!all.length) {
-      setError("Add at least one ingredient first.");
-      return;
-    }
-    if (typed.length) {
-      addIngredients(typed);
-      setDraft("");
-    }
-
+  async function requestRecipes(payload, avoid, fresh, previous) {
     setLoading(true);
     setError("");
     setRecipes([]);
     setNote("");
     try {
-      const data = await postJson("/api/recipes", requestBody(all, { exclude: disliked }));
-      setRecipes(data.recipes || []);
-      setProvider(data.provider || "");
-      setNote(data.note || (!data.recipes?.length ? "No recipes found. Try adding more ingredients." : ""));
-      setTimeout(() => {
-        if (window.matchMedia("(max-width: 859px)").matches) {
-          resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
-      }, 60);
+      const res = await fetch("/api/recipes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...payload, avoid })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Something went wrong.");
+      const list = data.recipes || [];
+      setRecipes(list);
+      setNote(data.note || "");
+      if (!list.length && !data.note) setNote("No recipes found.");
+      setSeenNames([...avoid, ...list.map((r) => r.name)]);
+      if (fresh) {
+        setIngredients([]);
+        setDraft("");
+      }
+      setTimeout(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth" }), 50);
     } catch (e) {
-      setError(friendlyError(e, "You're offline. Reconnect to get new recipes (your saved ones still work)."));
+      if (previous) {
+        setRecipes(previous.recipes);
+        setNote(previous.note);
+      }
+      setError(
+        !navigator.onLine
+          ? "You're offline. Reconnect to get new recipes (your saved ones still work)."
+          : e.message || "Couldn't reach the server."
+      );
     } finally {
       setLoading(false);
     }
   }
 
-  const requestBody = (all, extra = {}) => ({
-    ingredients: all.join(", "),
-    budget: budget === "" ? null : budget,
-    equipment,
-    servings,
-    diet,
-    pantry,
-    ...extra
-  });
-
-  const friendlyError = (e, offlineMsg) =>
-    !navigator.onLine ? offlineMsg : e.message || "Couldn't reach the server.";
-
-  // Replace ONE recipe with a new idea. If forget is true, the dish is also hidden from future searches.
-  async function swapRecipe(r, forget) {
-    if (swapping[r.name]) return;
-    const nextDisliked = forget ? [...new Set([...disliked, r.name])].slice(-50) : disliked;
-    if (forget) setDisliked(nextDisliked);
-    setSwapping((m) => ({ ...m, [r.name]: true }));
-    setSwapError((m) => ({ ...m, [r.name]: "" }));
-    try {
-      const data = await postJson(
-        "/api/recipes",
-        requestBody(ingredients, { count: 1, exclude: [...new Set([...nextDisliked, ...recipes.map((x) => x.name)])] })
-      );
-      const fresh = data.recipes?.[0];
-      if (!fresh) throw new Error(data.note || "Couldn't find another idea. Try adding more ingredients.");
-      setRecipes((prev) => prev.map((x) => (x.name === r.name ? fresh : x)));
-    } catch (e) {
-      setSwapError((m) => ({ ...m, [r.name]: friendlyError(e, "You're offline. Reconnect to swap recipes.") }));
-    } finally {
-      setSwapping((m) => {
-        const { [r.name]: _drop, ...rest } = m;
-        return rest;
-      });
+  function findRecipes() {
+    const all = draft.trim() ? [...ingredients, draft.trim()] : ingredients;
+    if (!all.length) {
+      setError("Add at least one ingredient first.");
+      return;
     }
+    if (draft.trim()) addIngredient(draft);
+    const payload = {
+      ingredients: all.join(", "),
+      budget: budget === "" ? null : budget,
+      equipment,
+      servings
+    };
+    setLastQuery(payload);
+    requestRecipes(payload, [], true, null);
   }
 
-  // Add up to 3 more ideas under the current ones.
-  async function moreIdeas() {
-    setMore(true);
-    setError("");
-    try {
-      const data = await postJson(
-        "/api/recipes",
-        requestBody(ingredients, { count: 3, exclude: [...new Set([...disliked, ...recipes.map((x) => x.name)])] })
-      );
-      const fresh = (data.recipes || []).filter((x) => !recipes.some((y) => y.name === x.name));
-      if (!fresh.length) setNote(data.note || "No more new ideas with these ingredients. Try adding some.");
-      setRecipes((prev) => [...prev, ...fresh]);
-    } catch (e) {
-      setError(friendlyError(e, "You're offline. Reconnect to get more ideas."));
-    } finally {
-      setMore(false);
-    }
+  function reloadRecipes() {
+    if (!lastQuery || loading) return;
+    requestRecipes(lastQuery, seenNames, false, { recipes, note });
   }
 
-  /* ---------- pantry, diet, shopping ---------- */
-  const inPantry = (name) => pantry.some((p) => canon(p) === canon(name));
-  function togglePantry(name) {
-    setPantry((prev) => (prev.some((p) => canon(p) === canon(name)) ? prev.filter((p) => canon(p) !== canon(name)) : [...prev, name]));
+  function setPhoto(name, dataUrl) {
+    setPhotos((prev) => ({ ...prev, [name]: dataUrl }));
   }
-  function addPantryFromDraft() {
-    const items = pantryDraft.split(",").map((s) => s.trim()).filter((s) => s && !inPantry(s));
-    if (items.length) setPantry((prev) => [...prev, ...items].slice(0, 40));
-    setPantryDraft("");
-  }
-  const toggleDiet = (d) => setDiet((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
 
-  const shopKey = (name) => canon(name) || name.toLowerCase();
-  const onList = (name) => shopping.some((i) => i.key === shopKey(name));
-  function addToShopping(recipe, ing) {
-    setShopping((prev) => {
-      const key = shopKey(ing.name);
-      const hit = prev.find((i) => i.key === key);
-      if (!hit) return [...prev, { key, name: ing.name, amount: ing.amount || "", price: ing.price_php || 0, recipes: [recipe.name], done: false }];
-      if (hit.recipes.includes(recipe.name)) return prev;
-      return prev.map((i) => (i.key === key ? { ...i, recipes: [...i.recipes, recipe.name] } : i));
+  function removePhoto(name) {
+    setPhotos((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
     });
   }
-  function toggleShopping(recipe, ing) {
-    if (onList(ing.name)) setShopping((prev) => prev.filter((i) => i.key !== shopKey(ing.name)));
-    else addToShopping(recipe, ing);
-  }
-  function addAllToShopping(recipe) {
-    withStatus(recipe, pantry).ingredients.filter((i) => i.status === "buy").forEach((i) => addToShopping(recipe, i));
-  }
+
+  const hasResults = loading || recipes.length > 0 || Boolean(note);
+
+  const budgetLabel = BUDGETS.find((b) => b.value === budget)?.label || "Any";
+
+  const usageCounts = Object.fromEntries(Object.values(quickAddUsage).map((u) => [u.name.toLowerCase(), u.count]));
+  const quickAddPool = [...QUICK_ADD];
+  Object.values(quickAddUsage).forEach((u) => {
+    if (!quickAddPool.some((p) => p.toLowerCase() === u.name.toLowerCase())) quickAddPool.push(u.name);
+  });
+  quickAddPool.sort((a, b) => (usageCounts[b.toLowerCase()] || 0) - (usageCounts[a.toLowerCase()] || 0));
+  const quickAddChips = (
+    draft.trim() ? quickAddPool.filter((q) => q.toLowerCase().includes(draft.trim().toLowerCase())) : quickAddPool
+  ).slice(0, 13);
+  const quickAddButtons = quickAddChips.map((q) => {
+    const on = ingredients.some((i) => i.toLowerCase() === q.toLowerCase());
+    return (
+      <button key={q} className={`chip ${on ? "chip-selected" : ""}`} disabled={scanning} onClick={() => toggleQuick(q)}>
+        {on ? "✓ " : "+ "}
+        {q}
+      </button>
+    );
+  });
+
+  const activeSession = cookSessions.find((s) => s.id === activeCookId) || null;
 
   const isSaved = (r) => saved.some((s) => s.name === r.name);
   function toggleSave(r) {
     setSaved((prev) => (isSaved(r) ? prev.filter((s) => s.name !== r.name) : [r, ...prev]));
   }
 
-  const budgetLabel = BUDGETS.find((b) => b.value === budget)?.label || "Any";
-  const providerName = PROVIDER_NAMES[provider];
-
   return (
-    <div className="app">
+    <div className={`app ${tab === "cook" && hasResults ? "app-wide" : ""}`}>
       <header className="header">
-        <div className="logo">🍳</div>
-        <div className="header-text">
-          <h1>
-            Fridge Chef <AiBadge>AI-powered</AiBadge>
-          </h1>
-          <p>Tell the AI what's in your fridge. Get recipes you can cook now.</p>
+        <div className="logo"><IconPan /></div>
+        <div>
+          <h1>Fridge Chef</h1>
+          <p>Cook with what you have.</p>
         </div>
-        <nav className="tabs" role="tablist" aria-label="Sections">
-          <button role="tab" aria-selected={tab === "cook"} className={tab === "cook" ? "active" : ""} onClick={() => setTab("cook")}>
-            Cook
-          </button>
-          <button role="tab" aria-selected={tab === "shopping"} className={tab === "shopping" ? "active" : ""} onClick={() => setTab("shopping")}>
-            Shopping{shopping.filter((i) => !i.done).length > 0 ? ` (${shopping.filter((i) => !i.done).length})` : ""}
-          </button>
-          <button role="tab" aria-selected={tab === "saved"} className={tab === "saved" ? "active" : ""} onClick={() => setTab("saved")}>
-            Saved{saved.length > 0 ? ` (${saved.length})` : ""}
-          </button>
-        </nav>
       </header>
 
-      {!online && <div className="banner">You're offline. Saved recipes still work.</div>}
+      {!online && <div className="banner">Offline. Saved recipes still work.</div>}
+      {photoWarn && <div className="banner">{photoWarn}</div>}
+
+      <nav className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "cook"} className={tab === "cook" ? "active" : ""} onClick={() => setTab("cook")}>
+          Cook
+        </button>
+        <button role="tab" aria-selected={tab === "saved"} className={tab === "saved" ? "active" : ""} onClick={() => setTab("saved")}>
+          Saved ({saved.length})
+        </button>
+      </nav>
 
       {tab === "cook" && (
-        <main className="layout">
-          <div className="panel">
-            <section className="card">
-              <label className="label" htmlFor="ing">My ingredients</label>
-              <div className="input-row">
-                <input
-                  id="ing"
-                  value={draft}
-                  placeholder="e.g. egg, rice, onion"
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addFromDraft();
-                    }
-                  }}
-                />
-                <button className="btn-small" onClick={addFromDraft} disabled={!draft.trim()}>
-                  Add
-                </button>
-              </div>
-
-              <div className="photo-row">
-                <button className="btn-photo" onClick={() => takeRef.current?.click()} disabled={scan.state === "working" || !online}>
-                  📷 Take photo
-                </button>
-                <button className="btn-photo" onClick={() => uploadRef.current?.click()} disabled={scan.state === "working" || !online}>
-                  🖼️ Upload photos
-                </button>
-                <AiBadge>AI scans it</AiBadge>
-                <input ref={takeRef} type="file" accept="image/*" capture="environment" hidden onChange={onPhotoChosen} />
-                <input ref={uploadRef} type="file" accept="image/*" multiple hidden onChange={onPhotoChosen} />
-              </div>
-
-              {scan.state !== "idle" && (
-                <div className={`scan scan-${scan.state}`} role="status" aria-live="polite">
-                  {scan.preview && <img src={scan.preview} alt="Your photo" />}
-                  <p>
-                    {scan.state === "working" && <span className="spinner" aria-hidden="true" />}
-                    {scan.message}
-                  </p>
-                  {scan.state !== "working" && (
-                    <button className="link" onClick={() => setScan({ state: "idle", preview: "", message: "" })}>
-                      Dismiss
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {ingredients.length > 0 && (
-                <div className="chips">
-                  {ingredients.map((i) => (
-                    <span key={i} className="chip chip-on">
-                      {i}
-                      <button aria-label={`Remove ${i}`} onClick={() => removeIngredient(i)}>×</button>
-                    </span>
-                  ))}
-                  <button className="link" onClick={() => setIngredients([])}>Clear all</button>
-                </div>
-              )}
-
-              <details className="quick">
-                <summary>Quick add common items</summary>
-                <div className="chips">
-                  {QUICK_ADD.map((q) => {
-                    const on = ingredients.some((i) => i.toLowerCase() === q.toLowerCase());
-                    return (
-                      <button key={q} className={`chip ${on ? "chip-selected" : ""}`} onClick={() => toggleQuick(q)}>
-                        {on ? "✓ " : "+ "}
-                        {q}
-                      </button>
-                    );
-                  })}
-                </div>
-              </details>
-            </section>
-
-            <section className="card options">
-              <button className="options-toggle" onClick={() => setShowOptions((v) => !v)} aria-expanded={showOptions}>
-                <span>
-                  <strong>Options</strong>
-                  <small>
-                    {budgetLabel} · {equipment.split(" (")[0]} · {servings} serving{servings > 1 ? "s" : ""}
-                  </small>
-                </span>
-                <span aria-hidden="true">{showOptions ? "▴" : "▾"}</span>
+        <main className={`cook-layout ${hasResults ? "has-results" : ""}`}>
+          <div className="cook-left">
+          <section className="card">
+            <label className="label card-title" htmlFor="ing">What's in your fridge?</label>
+            <div className="input-row">
+              <input
+                id="ing"
+                value={draft}
+                placeholder="e.g. egg, rice, onion"
+                disabled={scanning}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === ",") {
+                    e.preventDefault();
+                    addIngredient(draft);
+                  }
+                }}
+              />
+              <button className="btn-small" onClick={() => addIngredient(draft)} disabled={scanning || !draft.trim()}>
+                Add
               </button>
-              {showOptions && (
-                <div className="options-body">
-                  <div className="grid">
-                    <div>
-                      <label className="label" htmlFor="budget">Budget to buy extras</label>
-                      <select id="budget" value={budget} onChange={(e) => setBudget(e.target.value === "" ? "" : Number(e.target.value))}>
-                        {BUDGETS.map((b) => (
-                          <option key={b.label} value={b.value}>{b.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="label" htmlFor="equip">Equipment</label>
-                      <select id="equip" value={equipment} onChange={(e) => setEquipment(e.target.value)}>
-                        {EQUIPMENT.map((e) => (
-                          <option key={e}>{e}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div className="servings">
-                    <span className="label">Servings</span>
-                    <div className="stepper">
-                      <button aria-label="Fewer servings" onClick={() => setServings((s) => Math.max(1, s - 1))}>−</button>
-                      <span>{servings}</span>
-                      <button aria-label="More servings" onClick={() => setServings((s) => Math.min(6, s + 1))}>+</button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </section>
+            </div>
 
-            <section className="card options">
-              <button className="options-toggle" onClick={() => setShowPantry((v) => !v)} aria-expanded={showPantry}>
-                <span>
-                  <strong>Pantry &amp; diet</strong>
-                  <small>
-                    {pantry.length ? `${pantry.length} staple${pantry.length > 1 ? "s" : ""} at home` : "No staples set"} ·{" "}
-                    {diet.length ? diet.join(", ") : "No diet filter"}
-                  </small>
-                </span>
-                <span aria-hidden="true">{showPantry ? "▴" : "▾"}</span>
+            <div className="photo-row">
+              <input
+                ref={cameraInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                hidden
+                onChange={(e) => {
+                  handlePhotos(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={galleryInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  handlePhotos(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <button type="button" className="chip chip-photo" disabled={loading || scanning} onClick={() => cameraInputRef.current?.click()}>
+                <IconCamera />Take photo
               </button>
-              {showPantry && (
-                <div className="options-body">
-                  <div className="label">Always at home</div>
-                  <p className="hint">Tap what you always have. The AI will use it and won't tell you to buy it.</p>
-                  <div className="chips flush">
-                    {[...PANTRY_SUGGEST, ...pantry.filter((p) => !PANTRY_SUGGEST.some((q) => canon(q) === canon(p)))].map((q) => {
-                      const on = inPantry(q);
-                      return (
-                        <button key={q} className={`chip ${on ? "chip-selected" : ""}`} aria-pressed={on} onClick={() => togglePantry(q)}>
-                          {on ? "✓ " : "+ "}
-                          {q}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="input-row pantry-add">
-                    <input
-                      aria-label="Add your own staple"
-                      value={pantryDraft}
-                      placeholder="Add your own, e.g. oyster sauce"
-                      onChange={(e) => setPantryDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          addPantryFromDraft();
-                        }
-                      }}
-                    />
-                    <button className="btn-small" onClick={addPantryFromDraft} disabled={!pantryDraft.trim()}>Add</button>
-                  </div>
+              <button type="button" className="chip chip-photo" disabled={loading || scanning} onClick={() => galleryInputRef.current?.click()}>
+                <IconImage />Upload photos
+              </button>
+            </div>
+            {scanning && <div className="scan-hint">AI is scanning your photo…</div>}
+            {scanError && <div className="error" role="alert">{scanError}</div>}
 
-                  <div className="label diet-label">Diet &amp; allergies</div>
-                  <p className="hint">The AI must follow these, and the app double-checks every recipe.</p>
-                  <div className="chips flush">
-                    {DIET_OPTIONS.map((d) => {
-                      const on = diet.includes(d);
-                      return (
-                        <button key={d} className={`chip ${on ? "chip-selected" : ""}`} aria-pressed={on} onClick={() => toggleDiet(d)}>
-                          {on ? "✓ " : ""}
-                          {d}
-                        </button>
-                      );
-                    })}
-                  </div>
+            {ingredients.length > 0 && (
+              <div className="chips">
+                {ingredients.map((i) => (
+                  <span key={i} className="chip chip-on">
+                    {i}
+                    <button aria-label={`Remove ${i}`} disabled={scanning} onClick={() => removeIngredient(i)}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
 
-                  {disliked.length > 0 && (
-                    <p className="hint disliked-line">
-                      {disliked.length} dish{disliked.length > 1 ? "es" : ""} hidden from suggestions.{" "}
-                      <button className="link" onClick={() => setDisliked([])}>Show them again</button>
-                    </p>
-                  )}
+            {quickAddChips.length > 0 && (
+              draft.trim() ? (
+                <>
+                  <div className="sublabel">Matches</div>
+                  <div className="chips">{quickAddButtons}</div>
+                </>
+              ) : (
+                <details className="quick-add">
+                  <summary>Quick add common items</summary>
+                  <div className="chips">{quickAddButtons}</div>
+                </details>
+              )
+            )}
+          </section>
+
+          <section className="card">
+            <details className="options">
+              <summary>
+                Options
+                <span className="options-hint">
+                  {budgetLabel} · {equipment.split(" (")[0]} · {servings} serving{servings > 1 ? "s" : ""}
+                </span>
+              </summary>
+              <div className="grid">
+                <div>
+                  <label className="label" htmlFor="budget">Budget to buy extras</label>
+                  <select id="budget" value={budget} onChange={(e) => setBudget(e.target.value === "" ? "" : Number(e.target.value))}>
+                    {BUDGETS.map((b) => (
+                      <option key={b.label} value={b.value}>{b.label}</option>
+                    ))}
+                  </select>
                 </div>
-              )}
-            </section>
+                <div>
+                  <label className="label" htmlFor="equip">Equipment</label>
+                  <select id="equip" value={equipment} onChange={(e) => setEquipment(e.target.value)}>
+                    {EQUIPMENT.map((e) => (
+                      <option key={e}>{e}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="servings">
+                <span className="label">Servings</span>
+                <div className="stepper">
+                  <button aria-label="Fewer servings" onClick={() => setServings((s) => Math.max(1, s - 1))}>−</button>
+                  <span>{servings}</span>
+                  <button aria-label="More servings" onClick={() => setServings((s) => Math.min(6, s + 1))}>+</button>
+                </div>
+              </div>
+            </details>
+          </section>
 
-            <button className="btn-primary" onClick={findRecipes} disabled={loading || !online}>
-              {loading ? "AI is cooking up ideas…" : "✨ Find recipes with AI"}
-            </button>
-            {error && <div className="error" role="alert">{error}</div>}
+          <button className="btn-primary" onClick={findRecipes} disabled={loading || !online}>
+            {loading ? "Cooking up ideas…" : "Find recipes"}
+          </button>
+
+          {error && <div className="error" role="alert">{error}</div>}
           </div>
 
-          <section className="results" ref={resultsRef} aria-live="polite">
+          <div className="cook-right">
+          <div id="results">
+            {recipes.length > 0 && !loading && lastQuery && (
+              <div className="results-head">
+                <div className="results-text">
+                  <div className="results-title">{recipes.length} ideas for tonight</div>
+                  <div className="results-based">Based on: {lastQuery.ingredients}</div>
+                </div>
+                <button type="button" className="btn-new" onClick={reloadRecipes} disabled={!online}>
+                  <IconRefresh />New ideas
+                </button>
+              </div>
+            )}
             {loading && (
               <div className="skeletons" aria-hidden="true">
                 <div className="skeleton" /><div className="skeleton" /><div className="skeleton" />
               </div>
             )}
-
-            {!loading && recipes.length === 0 && (
-              <div className="placeholder">
-                <div className="placeholder-emoji">🍽️</div>
-                <h2>Your recipes will show up here</h2>
-                <p>Add what you have, or snap a photo, then let the AI suggest what to cook.</p>
-                {note && <p className="note">💡 {note}</p>}
-              </div>
+            {recipes.map((r) => (
+              <RecipeCard
+                key={r.name}
+                recipe={r}
+                saved={isSaved(r)}
+                onToggleSave={() => toggleSave(r)}
+                isCooking={cookSessions.some((s) => s.id === r.name)}
+                photo={photos[r.name]}
+                onPhoto={(d) => setPhoto(r.name, d)}
+                onRemovePhoto={() => removePhoto(r.name)}
+                onStartCooking={() => startCooking(r)}
+              />
+            ))}
+            {note && <p className="note">{note}</p>}
+            {recipes.length > 0 && !loading && lastQuery && (
+              <button type="button" className="btn-reload" onClick={reloadRecipes} disabled={!online}>
+                Not feeling these? Show different dishes
+              </button>
             )}
-
-            {recipes.length > 0 && (
-              <>
-                <div className="results-head">
-                  <h2>
-                    <AiBadge>AI-suggested</AiBadge> Recipes for you
-                  </h2>
-                  <p>
-                    {providerName ? `Made by ${providerName}. ` : ""}AI can make mistakes, so check that ingredients are fresh and food is cooked through.
-                  </p>
-                </div>
-                <div className="recipe-list">
-                  {recipes.map((r) => (
-                    <RecipeCard
-                      key={r.name}
-                      recipe={withStatus(r, pantry)}
-                      saved={isSaved(r)}
-                      onToggleSave={() => toggleSave(r)}
-                      onOpen={() => setOpen(r)}
-                      onSwap={() => swapRecipe(r, false)}
-                      onDislike={() => swapRecipe(r, true)}
-                      busy={!!swapping[r.name]}
-                      error={swapError[r.name]}
-                    />
-                  ))}
-                </div>
-                <button className="btn-more" onClick={moreIdeas} disabled={more || !online || recipes.length >= 9}>
-                  {more ? "Finding more ideas…" : recipes.length >= 9 ? "That's plenty of ideas!" : "✨ More ideas"}
-                </button>
-                {note && <p className="note">💡 {note}</p>}
-              </>
-            )}
-          </section>
+          </div>
+          </div>
         </main>
       )}
 
-      {tab === "shopping" && (
-        <Shopping items={shopping} setItems={setShopping} onGoCook={() => setTab("cook")} />
-      )}
-
       {tab === "saved" && (
-        <main className="saved">
+        <main>
           {saved.length === 0 ? (
-            <div className="placeholder">
-              <div className="placeholder-emoji">🔖</div>
-              <h2>No saved recipes yet</h2>
-              <p>Tap the heart on any recipe to keep it here. Saved recipes work offline.</p>
+            <div className="empty">
+              <div className="empty-icon">
+                <svg width="40" height="40" {...svgProps} strokeWidth="1.6"><path d="M6 4h12v17l-6-4-6 4z" /></svg>
+              </div>
+              <p>No saved recipes yet.</p>
             </div>
           ) : (
-            <div className="recipe-list recipe-grid">
-              {saved.map((r) => (
-                <RecipeCard key={r.name} recipe={withStatus(r, pantry)} saved onToggleSave={() => toggleSave(r)} onOpen={() => setOpen(r)} />
-              ))}
-            </div>
+            saved.map((r) => (
+              <RecipeCard
+                key={r.name}
+                recipe={r}
+                saved
+                onToggleSave={() => toggleSave(r)}
+                isCooking={cookSessions.some((s) => s.id === r.name)}
+                photo={photos[r.name]}
+                onPhoto={(d) => setPhoto(r.name, d)}
+                onRemovePhoto={() => removePhoto(r.name)}
+                onStartCooking={() => startCooking(r)}
+              />
+            ))
           )}
         </main>
       )}
 
-      <footer className="footer">
-        Recipes and photo reading are created by AI and may contain mistakes. Dish photos come from Wikimedia Commons and may not look exactly like your result. Prices are rough estimates. Diet filters help, but always check labels if you have an allergy.
-        Photos are sent to the AI only to read your ingredients and are not saved by this app.
-      </footer>
+      <footer className="footer">Estimates only. Cook food thoroughly.</footer>
 
-      {open && (
-        <RecipeModal
-          recipe={withStatus(open, pantry)}
-          saved={isSaved(open)}
-          onToggleSave={() => toggleSave(open)}
-          onClose={() => setOpen(null)}
-          onList={onList}
-          onToggleItem={(ing) => toggleShopping(open, ing)}
-          onAddAll={() => addAllToShopping(open)}
-          onCook={() => {
-            const dish = withStatus(open, pantry);
-            setCookList((list) => (list.some((d) => d.name === dish.name) ? list : [...list, dish]));
-            setCookMin(false);
-            setOpen(null);
-          }}
-        />
+      {cookSessions.length > 0 && (
+        <CookDock sessions={cookSessions} activeId={activeCookId} onOpen={openCooking} onEnd={endCooking} />
       )}
-      {cookList.length > 0 && (
+
+      {activeSession && (
         <CookMode
-          dishes={cookList}
-          choices={[...recipes, ...saved].filter((c, i, a) => a.findIndex((x) => x.name === c.name) === i).map((c) => withStatus(c, pantry))}
-          minimized={cookMin}
-          onAddDish={(dish) => setCookList((list) => (list.some((d) => d.name === dish.name) ? list : [...list, dish]))}
-          onRemoveDish={(name) => setCookList((list) => list.filter((d) => d.name !== name))}
-          onMinimize={() => setCookMin(true)}
-          onRestore={() => setCookMin(false)}
-          onClose={() => {
-            setCookList([]);
-            setCookMin(false);
-          }}
+          key={activeSession.id}
+          session={activeSession}
+          onMinimize={() => setActiveCookId(null)}
+          onStop={() => endCooking(activeSession.id)}
+          onConfirm={() => confirmCookStep(activeSession.id)}
+          onPrev={() => prevCookStep(activeSession.id)}
+          onToggleGathered={(name) => toggleCookGathered(activeSession.id, name)}
+          onAdjustTimer={(delta) => adjustCookTimer(activeSession.id, delta)}
+          onResetTimer={() => resetCookTimer(activeSession.id)}
+          onSetRunning={(running) => setCookRunning(activeSession.id, running)}
         />
       )}
     </div>
   );
 }
 
-function RecipeCard({ recipe: r, saved, onToggleSave, onOpen, onSwap, onDislike, busy, error }) {
+function RecipeCard({ recipe: r, saved, onToggleSave, onStartCooking, isCooking, photo, onPhoto, onRemovePhoto }) {
   const buy = r.need_to_buy || [];
   return (
-    <article className={`card recipe ${busy ? "recipe-busy" : ""}`}>
-      <div className="recipe-row">
-        <DishPhoto recipe={r} className="thumb" />
-        <div className="recipe-main">
-          <div className="recipe-top">
-            <h3>{r.name}</h3>
-            <button className={`heart ${saved ? "heart-on" : ""}`} onClick={onToggleSave} aria-pressed={saved} aria-label={saved ? "Unsave recipe" : "Save recipe"}>
-              {saved ? "♥" : "♡"}
-            </button>
-          </div>
-          <p className="summary">{r.summary}</p>
-          <div className="meta">
-            <span>⏱ {r.time_minutes} min</span>
-            <span>👩‍🍳 {r.difficulty}</span>
-            <span>💰 {r.estimated_extra_cost_php > 0 ? `≈ ₱${r.estimated_extra_cost_php}` : "No extra cost"}</span>
+    <article className="card recipe">
+      <DishPhoto name={r.name} photo={photo} onPhoto={onPhoto} onRemove={onRemovePhoto} />
+      <div className="recipe-top">
+        <h2>{r.name}</h2>
+        <button className={`heart ${saved ? "heart-on" : ""}`} onClick={onToggleSave} aria-pressed={saved} aria-label={saved ? "Unsave recipe" : "Save recipe"}>
+          {saved ? "♥" : "♡"}
+        </button>
+      </div>
+      <p className="summary">{r.summary}</p>
+
+      <div className="meta">
+        <span>{r.time_minutes} min</span>
+        <span>{r.difficulty}</span>
+        <span>{r.estimated_extra_cost_php > 0 ? `About ₱${r.estimated_extra_cost_php} extra` : "No extra cost"}</span>
+      </div>
+
+      {r.uses?.length > 0 && (
+        <div className="row">
+          <div className="sublabel">You'll use</div>
+          <div className="chips">
+            {r.uses.map((u) => (
+              <span key={u} className="chip chip-have">{u}</span>
+            ))}
           </div>
         </div>
-      </div>
-      <p className="buy-line">
+      )}
+
+      <div className="row">
+        <div className="sublabel">Need to buy</div>
         {buy.length === 0 ? (
-          <span className="good">✓ You have everything</span>
+          <span className="good">Nothing! You have it all.</span>
         ) : (
-          <>
-            <span className="buy-label">Need:</span> {buy.join(", ")}
-          </>
-        )}
-      </p>
-      {error && <p className="swap-error" role="alert">{error}</p>}
-      <div className="card-actions">
-        <button className="btn-view" onClick={onOpen} disabled={busy}>View recipe</button>
-        {onSwap && (
-          <>
-            <button className="btn-ghost" onClick={onSwap} disabled={busy} aria-label={`Swap ${r.name} for another idea`}>
-              {busy ? "Swapping…" : "↻ Swap"}
-            </button>
-            <button className="btn-ghost" onClick={onDislike} disabled={busy} aria-label={`I don't like ${r.name}`}>
-              👎 Not for me
-            </button>
-          </>
+          <div className="chips">
+            {buy.map((b) => (
+              <span key={b} className="chip chip-buy">{b}</span>
+            ))}
+          </div>
         )}
       </div>
-      {busy && <div className="card-busy" aria-hidden="true" />}
+
+      <button className="btn-cook" onClick={onStartCooking}>
+        {isCooking ? "Resume cooking" : "Start cooking"}
+      </button>
     </article>
   );
 }
 
-function RecipeModal({ recipe: r, saved, onToggleSave, onClose, onList, onToggleItem, onAddAll, onCook }) {
-  const closeRef = useRef(null);
-  const mains = r.ingredients.filter((i) => i.kind !== "pampalasa");
-  const spices = r.ingredients.filter((i) => i.kind === "pampalasa");
-  const buyItems = r.ingredients.filter((i) => i.status === "buy");
-  const allListed = buyItems.length > 0 && buyItems.every((i) => onList(i.name));
-
-  const row = (i) => (
-    <li key={i.name} className={`ing ing-${i.status}`}>
-      <span className="ing-name">
-        {i.name}
-        {i.amount ? <small> · {i.amount}</small> : null}
-      </span>
-      {i.status === "buy" ? (
-        <button className={`ing-buy ${onList(i.name) ? "ing-buy-on" : ""}`} aria-pressed={onList(i.name)} onClick={() => onToggleItem(i)}>
-          {onList(i.name) ? "✓ On list" : `+ Buy${i.price_php ? ` ≈ ${peso(i.price_php)}` : ""}`}
-        </button>
-      ) : (
-        <span className="ing-tag">{i.status === "pantry" ? "In pantry" : "Have"}</span>
-      )}
-    </li>
+function CookDock({ sessions, activeId, onOpen, onEnd }) {
+  return (
+    <div className="cook-dock">
+      {sessions.map((s) => {
+        const steps = s.recipe.steps || [];
+        return (
+          <div key={s.id} className={`cook-dock-tab ${activeId === s.id ? "active" : ""}`}>
+            <button type="button" className="cook-dock-open" onClick={() => onOpen(s.id)}>
+              <span className="cook-dock-name">{s.recipe.name}</span>
+              <span className="cook-dock-progress">
+                Step {s.stepIndex + 1}/{steps.length}
+                {s.running ? ` · ${formatClock(s.secondsLeft)}` : ""}
+              </span>
+            </button>
+            <button type="button" className="cook-dock-close" aria-label={`Stop cooking ${s.recipe.name}`} onClick={() => onEnd(s.id)}>
+              ×
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
+}
+
+function CookMode({ session, onMinimize, onStop, onConfirm, onPrev, onToggleGathered, onAdjustTimer, onResetTimer, onSetRunning }) {
+  const r = session.recipe;
+  const { stepIndex, secondsLeft, running, gathered } = session;
 
   useEffect(() => {
-    const previouslyFocused = document.activeElement;
-    closeRef.current?.focus();
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-      previouslyFocused?.focus?.();
-    };
-  }, [onClose]);
+    let wakeLock;
+    navigator.wakeLock?.request("screen").then((wl) => (wakeLock = wl)).catch(() => {});
+    return () => wakeLock?.release().catch(() => {});
+  }, []);
+
+  const ingredients = [...(r.uses || []), ...(r.need_to_buy || [])];
+  const steps = r.steps || [];
+  const stepDuration = parseStepSeconds(steps[stepIndex]);
 
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-        <div className="modal-head">
-          <div>
-            <h2 id="modal-title">{r.name}</h2>
-            <div className="meta">
-              <span>⏱ {r.time_minutes} min</span>
-              <span>👩‍🍳 {r.difficulty}</span>
-              <span>💰 {r.estimated_extra_cost_php > 0 ? `≈ ₱${r.estimated_extra_cost_php} extra` : "No extra cost"}</span>
-            </div>
-          </div>
-          <button ref={closeRef} className="modal-close" onClick={onClose} aria-label="Close recipe">×</button>
+    <div className="cook-mode">
+      <div className="cook-mode-inner">
+        <div className="cook-top">
+          <button className="cook-back" aria-label="Minimize cook mode" onClick={onMinimize}>—</button>
+          <h2>{r.name}</h2>
+          <button className="cook-stop" onClick={onStop}>Stop cooking</button>
         </div>
 
-        <div className="modal-body">
-          <DishPhoto recipe={r} className="photo-banner" />
-          <PhotoCredit recipe={r} />
-          <div className="modal-cols">
-            <div>
-              <div className="sublabel">Ingredients</div>
-              <ul className="ing-list">{mains.map(row)}</ul>
-              {spices.length > 0 && (
-                <>
-                  <div className="sublabel">Pampalasa (seasonings)</div>
-                  <ul className="ing-list">{spices.map(row)}</ul>
-                </>
-              )}
-              {buyItems.length === 0 ? (
-                <p className="good all-set">Nothing to buy! You have it all 🎉</p>
-              ) : (
-                <button className="btn-addall" onClick={onAddAll} disabled={allListed}>
-                  {allListed ? "✓ All added to shopping list" : `🛒 Add ${buyItems.length} to shopping list · ≈ ${peso(r.estimated_extra_cost_php)}`}
-                </button>
-              )}
-              {r.substitutions?.length > 0 && (
-                <div className="subs">
-                  <strong>Swap ideas</strong>
-                  <ul>
-                    {r.substitutions.map((s, i) => (
-                      <li key={i}>{s}</li>
-                    ))}
-                  </ul>
+        {ingredients.length > 0 && (
+          <section className="cook-section">
+            <div className="sublabel">Gather these</div>
+            <ul className="cook-checklist">
+              {ingredients.map((ing) => (
+                <li key={ing}>
+                  <label>
+                    <input type="checkbox" checked={gathered.includes(ing)} onChange={() => onToggleGathered(ing)} />
+                    <span className={gathered.includes(ing) ? "done" : ""}>{ing}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {steps.length > 0 && (
+          <section className="cook-section">
+            <div className="cook-progress-row">
+              <div className="sublabel">Step {stepIndex + 1} of {steps.length}</div>
+              <span className="cook-progress">{stepIndex}/{steps.length} done</span>
+            </div>
+            <div className="cook-progress-bar">
+              <div className="cook-progress-fill" style={{ width: `${(stepIndex / steps.length) * 100}%` }} />
+            </div>
+
+            <p className="cook-step-text">{steps[stepIndex]}</p>
+
+            {stepDuration != null && (
+              <div className="cook-timer">
+                <div className="cook-timer-main">
+                  <span className={`cook-timer-clock ${secondsLeft === 0 ? "cook-timer-done" : ""}`}>
+                    {formatClock(secondsLeft)}
+                  </span>
+                  <span className="cook-timer-rec">Recommended {formatClock(stepDuration)}</span>
                 </div>
-              )}
-            </div>
-            <div>
-              <div className="sublabel">Steps</div>
-              <ol className="steps">
-                {(r.steps || []).map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ol>
-            </div>
-          </div>
-          <p className="ai-note">✨ This recipe was written by AI. Check that ingredients are fresh and food is cooked through.</p>
-        </div>
+                <div className="cook-timer-actions">
+                  <button type="button" className="chip" onClick={() => onAdjustTimer(-60)}>−1 min</button>
+                  <button type="button" className="chip" onClick={() => onAdjustTimer(-10)}>−10s</button>
+                  <button type="button" className="chip" onClick={() => onAdjustTimer(10)}>+10s</button>
+                  <button type="button" className="chip" onClick={() => onAdjustTimer(60)}>+1 min</button>
+                  {running ? (
+                    <button type="button" className="chip" onClick={() => onSetRunning(false)}>⏸ Pause</button>
+                  ) : (
+                    <button type="button" className="chip" disabled={secondsLeft <= 0} onClick={() => onSetRunning(true)}>▶ Start</button>
+                  )}
+                  <button type="button" className="chip" onClick={onResetTimer}>↺ Use recommended</button>
+                </div>
+              </div>
+            )}
 
-        <div className="modal-foot">
-          <button className={`btn-save ${saved ? "btn-save-on" : ""}`} onClick={onToggleSave} aria-pressed={saved}>
-            {saved ? "♥ Saved" : "♡ Save recipe"}
-          </button>
-          <button className="btn-done" onClick={onCook}>👩‍🍳 Start cooking</button>
-        </div>
+            {stepDuration != null && secondsLeft > 0 && (
+              <p className="cook-timer-wait">⏳ Finish the timer to continue.</p>
+            )}
+
+            <div className="cook-step-nav">
+              <button type="button" className="chip" disabled={stepIndex === 0} onClick={onPrev}>
+                ← Back
+              </button>
+              <button
+                type="button"
+                className="btn-primary cook-confirm"
+                disabled={stepDuration != null && secondsLeft > 0}
+                onClick={onConfirm}
+              >
+                {stepIndex < steps.length - 1 ? "✓ Confirm & next step" : "✓ Confirm — done cooking!"}
+              </button>
+            </div>
+          </section>
+        )}
+
+        {r.substitutions?.length > 0 && (
+          <section className="cook-section subs">
+            <strong>Swap ideas</strong>
+            <ul>
+              {r.substitutions.map((s, i) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <button className="btn-primary" onClick={onMinimize}>Back to recipes</button>
       </div>
     </div>
   );
